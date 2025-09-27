@@ -2,8 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import pkg from "pg";
-import bcrypt from "bcryptjs"; // por si después usas contraseñas hasheadas
-import crypto from "crypto";    // <-- NUEVO: para generar tokens
+import bcrypt from "bcryptjs"; // lo dejamos para PM por compatibilidad
 
 dotenv.config();
 const { Pool } = pkg;
@@ -19,21 +18,17 @@ app.use(express.json());
 // Conexión a Postgres
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // si tu servidor requiere ssl:
-  // ssl: { rejectUnauthorized: false }
+  // ssl: { rejectUnauthorized: false } // si tu server lo requiere
 });
-
-// (opcional) base de la web para armar links de verificación
-const WEB_BASE = process.env.WEB_BASE || "https://web.proyectosfranco.cl";
 
 // Salud
 app.get("/health", (req, res) => {
   res.json({ ok: true, service: "huechuraba-api" });
 });
 
-// ===================================================================
-// Login Personal Municipal (SIN CAMBIOS)
-// ===================================================================
+/* =========================================================
+   LOGIN: PERSONAL MUNICIPAL (se mantiene igual que tenías)
+   ========================================================= */
 app.post("/auth/login", async (req, res) => {
   try {
     const { correo, contrasenia } = req.body; // "contrasenia" en JSON
@@ -66,7 +61,7 @@ app.post("/auth/login", async (req, res) => {
     const stored = String(user.password || "");
     const plain = String(contrasenia);
 
-    // Soporta texto plano o hash bcrypt (por si migras más adelante)
+    // Soporta texto plano o hash bcrypt
     let valid = false;
     if (stored.startsWith("$2a$") || stored.startsWith("$2b$") || stored.startsWith("$2y$")) {
       valid = await bcrypt.compare(plain, stored);
@@ -78,7 +73,6 @@ app.post("/auth/login", async (req, res) => {
       return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
     }
 
-    // (Opcional) firma JWT, por ahora devuelvo datos simples
     return res.json({
       ok: true,
       user: {
@@ -96,148 +90,38 @@ app.post("/auth/login", async (req, res) => {
   }
 });
 
-// ===================================================================
-// NUEVO: Registro de Ciudadanía
-//  - Inserta o actualiza no-verificados, genera token y expiración (24h)
-//  - Por ahora, devuelve verifyLink (útil mientras no se envía correo real)
-// ===================================================================
-app.post("/citizens/register", async (req, res) => {
-  try {
-    const { correo, contrasenia, nombre, telefono } = req.body;
+/* =========================================================
+   NUEVO: CIUDADANOS (simple, sin verificación por correo)
+   ========================================================= */
 
-    if (!correo || !contrasenia || !nombre || !telefono) {
-      return res.status(400).json({ ok: false, error: "Faltan datos" });
-    }
-
-    // Teléfono: 569XXXXXXXX
-    if (!/^569\d{8}$/.test(String(telefono))) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Teléfono inválido. Usa el formato 569XXXXXXXX" });
-    }
-
-    // ¿Existe ya?
-    const { rows: exist } = await pool.query(
-      `SELECT id, verificado FROM public.ciudadanos WHERE correo = $1 LIMIT 1`,
-      [correo]
-    );
-    if (exist.length && exist[0].verificado) {
-      return res.status(409).json({ ok: false, error: "Ese correo ya está registrado" });
-    }
-
-    // hash de contraseña
-    const hash = await bcrypt.hash(String(contrasenia), 10);
-
-    // token y expiración (24h)
-    const token = crypto.randomBytes(24).toString("hex");
-    const expiracionHoras = 24;
-
-    if (exist.length) {
-      // Ya existía sin verificar → reemitimos token y actualizamos datos
-      await pool.query(
-        `UPDATE public.ciudadanos
-         SET contrasenia = $1,
-             nombre = $2,
-             telefono = $3,
-             verificacion_token = $4,
-             verificacion_expira = NOW() + INTERVAL '${expiracionHoras} hours'
-         WHERE id = $5`,
-        [hash, nombre, telefono, token, exist[0].id]
-      );
-    } else {
-      // Nuevo registro
-      await pool.query(
-        `INSERT INTO public.ciudadanos
-         (correo, contrasenia, nombre, telefono, verificado, verificacion_token, verificacion_expira)
-         VALUES ($1,$2,$3,$4,false,$5, NOW() + INTERVAL '${expiracionHoras} hours')`,
-        [correo, hash, nombre, telefono, token]
-      );
-    }
-
-    const verifyLink = `${WEB_BASE}/verify.html?token=${token}`;
-    console.log("LINK DE VERIFICACIÓN (para pruebas):", verifyLink);
-
-    return res.json({
-      ok: true,
-      message: "Registro recibido. Revisa tu correo para verificar la cuenta.",
-      verifyLink // útil mientras aún no enviamos email real
-    });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ ok: false, error: "Error de servidor" });
-  }
-});
-
-// ===================================================================
-// NUEVO: Verificar Ciudadanía (usado por verify.html)
-// GET /citizens/verify?token=xxxxx
-// ===================================================================
-app.get("/citizens/verify", async (req, res) => {
-  try {
-    const { token } = req.query;
-    if (!token) {
-      return res.status(400).json({ ok: false, error: "Falta token" });
-    }
-
-    const { rowCount } = await pool.query(
-      `UPDATE public.ciudadanos
-       SET verificado = true,
-           verificacion_token = NULL,
-           verificacion_expira = NULL
-       WHERE verificacion_token = $1
-         AND verificacion_expira > NOW()`,
-      [token]
-    );
-
-    if (rowCount !== 1) {
-      return res.status(400).json({ ok: false, error: "Token inválido o expirado" });
-    }
-
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ ok: false, error: "Error de servidor" });
-  }
-});
-
-// ===================================================================
-// NUEVO: Login de Ciudadanía
-//  - Acepta contraseñas en hash o texto plano (por compatibilidad)
-// ===================================================================
-app.post("/citizens/login", async (req, res) => {
+/** Login Ciudadanos: compara en texto plano (prototipo) */
+app.post("/ciudadanos/login", async (req, res) => {
   try {
     const { correo, contrasenia } = req.body;
     if (!correo || !contrasenia) {
       return res.status(400).json({ ok: false, error: "Faltan datos" });
     }
 
-    const { rows } = await pool.query(
-      `SELECT id, correo, contrasenia, nombre, telefono, verificado
-       FROM public.ciudadanos
-       WHERE correo = $1
-       LIMIT 1`,
-      [correo]
-    );
+    const q = `
+      SELECT id, correo, contrasenia, nombre, telefono, verificado
+      FROM public.ciudadanos
+      WHERE LOWER(correo) = $1
+      LIMIT 1
+    `;
+    const { rows } = await pool.query(q, [correo.toLowerCase()]);
     const user = rows[0];
+
     if (!user) {
       return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
     }
-    if (!user.verificado) {
-      return res.status(403).json({ ok: false, error: "Cuenta no verificada" });
-    }
 
-    const stored = String(user.contrasenia || "");
-    const plain = String(contrasenia);
-    let valid = false;
-
-    if (stored.startsWith("$2a$") || stored.startsWith("$2b$") || stored.startsWith("$2y$")) {
-      valid = await bcrypt.compare(plain, stored);
-    } else {
-      valid = stored === plain; // compatibilidad si existen filas antiguas en texto plano
-    }
-
-    if (!valid) {
+    // Prototipo: comparación en texto plano
+    if (String(user.contrasenia) !== String(contrasenia)) {
       return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
+    }
+
+    if (user.verificado === false) {
+      return res.status(403).json({ ok: false, error: "Cuenta no verificada" });
     }
 
     return res.json({
@@ -255,9 +139,60 @@ app.post("/citizens/login", async (req, res) => {
   }
 });
 
+/** Registro Ciudadanos: guarda password tal cual y verificado=true por defecto */
+app.post("/ciudadanos/register", async (req, res) => {
+  try {
+    const { nombre, correo, telefono, contrasenia } = req.body;
+
+    if (!nombre || !correo || !telefono || !contrasenia) {
+      return res.status(400).json({ ok: false, error: "Faltan datos" });
+    }
+
+    // Validación simple de teléfono: 12 dígitos y empiece por 569
+    if (!/^569\d{8}$/.test(String(telefono))) {
+      return res.status(400).json({ ok: false, error: "Teléfono inválido (usa formato 569XXXXXXXX)" });
+    }
+
+    // Insert (verificado por defecto TRUE, y correo único)
+    const q = `
+      INSERT INTO public.ciudadanos (correo, contrasenia, nombre, telefono, verificado)
+      VALUES ($1, $2, $3, $4, TRUE)
+      RETURNING id, correo, nombre, telefono
+    `;
+    try {
+      const { rows } = await pool.query(q, [
+        correo.toLowerCase(),
+        contrasenia, // PROTOTIPO: sin hash
+        nombre,
+        telefono
+      ]);
+      const user = rows[0];
+
+      return res.json({
+        ok: true,
+        user: {
+          id: user.id,
+          nombre: user.nombre,
+          correo: user.correo,
+          telefono: user.telefono
+        },
+        message: "Registro completado"
+      });
+    } catch (e) {
+      // Si viola la restricción única del correo
+      if (String(e?.message || "").toLowerCase().includes("unique")) {
+        return res.status(409).json({ ok: false, error: "Este correo ya está registrado" });
+      }
+      throw e;
+    }
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error de servidor" });
+  }
+});
+
 // Puerto
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`API escuchando en puerto ${PORT}`);
 });
-
