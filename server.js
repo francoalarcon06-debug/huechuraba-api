@@ -2,14 +2,14 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import pkg from "pg";
-import bcrypt from "bcryptjs";
+import bcrypt from "bcryptjs"; // por si después usas contraseñas hasheadas
 
 dotenv.config();
 const { Pool } = pkg;
 
 const app = express();
 
-// CORS (ajusta el origen en producción)
+// CORS (ajusta el origen a tu web en producción)
 const ALLOW_ORIGIN = process.env.CORS_ORIGIN || "*";
 app.use(cors({ origin: ALLOW_ORIGIN, credentials: true }));
 
@@ -18,30 +18,28 @@ app.use(express.json());
 // Conexión a Postgres
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // Si tu instancia requiere SSL, descomenta:
-  // ssl: { rejectUnauthorized: false },
+  // si tu servidor requiere ssl:
+  // ssl: { rejectUnauthorized: false }
 });
 
 // Salud
-app.get("/health", (_req, res) => {
+app.get("/health", (req, res) => {
   res.json({ ok: true, service: "huechuraba-api" });
 });
 
-// Login Personal Municipalidad
+// Login Personal Municipal
 app.post("/auth/login", async (req, res) => {
   try {
-    const { correo, contrasenia } = req.body; // usamos "contrasenia" en el JSON
+    const { correo, contrasenia } = req.body; // "contrasenia" en JSON
     if (!correo || !contrasenia) {
       return res.status(400).json({ ok: false, error: "Faltan datos" });
     }
 
-    // Nota: en la base la columna es "contraseña" (con ñ).
-    // Para ser tolerantes si después creas "contrasenia", usamos COALESCE.
     const q = `
       SELECT
         id,
         correo,
-        COALESCE("contraseña", contrasenia) AS password,
+        "contraseña" AS password,
         nombre,
         rut,
         cargo,
@@ -52,7 +50,6 @@ app.post("/auth/login", async (req, res) => {
       WHERE LOWER(correo) = $1
       LIMIT 1
     `;
-
     const { rows } = await pool.query(q, [correo.toLowerCase()]);
     const user = rows[0];
 
@@ -60,10 +57,10 @@ app.post("/auth/login", async (req, res) => {
       return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
     }
 
-    const stored = String(user.password ?? "");
+    const stored = String(user.password || "");
     const plain = String(contrasenia);
 
-    // Soporta texto plano o hash bcrypt
+    // Soporta ambas: texto plano o hash bcrypt (por si migras más adelante)
     let valid = false;
     if (stored.startsWith("$2a$") || stored.startsWith("$2b$") || stored.startsWith("$2y$")) {
       valid = await bcrypt.compare(plain, stored);
@@ -75,7 +72,7 @@ app.post("/auth/login", async (req, res) => {
       return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
     }
 
-    // Respuesta simple (si luego quieres JWT lo agregamos)
+    // (Opcional) firma JWT, por ahora devuelvo datos simples
     return res.json({
       ok: true,
       user: {
@@ -84,8 +81,8 @@ app.post("/auth/login", async (req, res) => {
         correo: user.correo,
         rut: user.rut,
         cargo: user.cargo,
-        departamento: user.departamento,
-      },
+        departamento: user.departamento
+      }
     });
   } catch (err) {
     console.error(err);
